@@ -1,99 +1,82 @@
 #include <iostream>
-#include <vector>
-#include <cstdlib>
 #include <cuda_runtime.h>
 
-#define N (1 << 20)  // Размер вектора (2^20 элементов)
+#define VECTOR_SIZE (1 << 20)  // 1048576 элементов
 
-__global__ void vector_add_gpu(float *A, float *B, float *C, int n) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;  // Индекс потока
-    if (i < n) {
-        C[i] = A[i] + B[i];  // Сложение элементов
+// Ядро CUDA для сложения двух векторов
+__global__ void vectorAdd(const float *A, const float *B, float *C, int size) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < size) {
+        C[i] = A[i] + B[i];
     }
 }
 
-void check_cuda_error(const char* msg) {
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        std::cerr << msg << " failed: " << cudaGetErrorString(err) << std::endl;
-        exit(EXIT_FAILURE);
-    }
-}
-
-int main() {
-    // Выделение памяти для векторов
-    std::vector<float> h_A(N), h_B(N), h_C(N);
+// Функция для замера времени выполнения с использованием CUDA events
+float measureKernelExecutionTime(int threadsPerBlock) {
     float *d_A, *d_B, *d_C;
+    float *h_A = new float[VECTOR_SIZE];
+    float *h_B = new float[VECTOR_SIZE];
+    float *h_C = new float[VECTOR_SIZE];
 
-    // Заполнение хостовых векторов случайными числами
-    for (int i = 0; i < N; ++i) {
-        h_A[i] = static_cast<float>(rand()) / RAND_MAX;
-        h_B[i] = static_cast<float>(rand()) / RAND_MAX;
+    // Инициализация входных данных
+    for (int i = 0; i < VECTOR_SIZE; i++) {
+        h_A[i] = static_cast<float>(i);
+        h_B[i] = static_cast<float>(VECTOR_SIZE - i);
     }
 
-    // Выделение памяти на устройстве
-    cudaMalloc((void**)&d_A, N * sizeof(float));
-    cudaMalloc((void**)&d_B, N * sizeof(float));
-    cudaMalloc((void**)&d_C, N * sizeof(float));
-    check_cuda_error("Memory allocation on device");
+    // Выделение памяти на GPU
+    cudaMalloc((void**)&d_A, VECTOR_SIZE * sizeof(float));
+    cudaMalloc((void**)&d_B, VECTOR_SIZE * sizeof(float));
+    cudaMalloc((void**)&d_C, VECTOR_SIZE * sizeof(float));
 
-    // Копирование данных с хоста на устройство
-    cudaMemcpy(d_A, h_A.data(), N * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_B, h_B.data(), N * sizeof(float), cudaMemcpyHostToDevice);
-    check_cuda_error("Memory copy from host to device");
+    // Копирование данных на GPU
+    cudaMemcpy(d_A, h_A, VECTOR_SIZE * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, h_B, VECTOR_SIZE * sizeof(float), cudaMemcpyHostToDevice);
 
-    // Разные конфигурации блоков и нитей
-    int block_sizes[] = {1, 16, 32, 64, 128, 256, 512, 1024};
+    // Определение конфигурации сетки и блоков
+    int blocksPerGrid = (VECTOR_SIZE + threadsPerBlock - 1) / threadsPerBlock;
 
-    for (int block_size : block_sizes) {
-        // Вычисляем количество блоков в сетке
-        int num_blocks = (N + block_size - 1) / block_size;
+    // Создание CUDA событий
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
 
-        // События для замера времени
-        cudaEvent_t start, stop;
-        cudaEventCreate(&start);
-        cudaEventCreate(&stop);
+    // Запуск и замер времени выполнения
+    cudaEventRecord(start);
+    vectorAdd<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_B, d_C, VECTOR_SIZE);
+    cudaEventRecord(stop);
 
-        // Запуск события
-        cudaEventRecord(start);
+    // Ожидание завершения выполнения ядра
+    cudaEventSynchronize(stop);
 
-        // Запуск ядра с разными конфигурациями
-        vector_add_gpu<<<num_blocks, block_size>>>(d_A, d_B, d_C, N);
-        cudaDeviceSynchronize();
-        check_cuda_error("Kernel launch failed");
+    // Измерение времени
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
 
-        // Запуск события остановки
-        cudaEventRecord(stop);
-        cudaEventSynchronize(stop);
+    // Копирование результата обратно на CPU
+    cudaMemcpy(h_C, d_C, VECTOR_SIZE * sizeof(float), cudaMemcpyDeviceToHost);
 
-        // Измерение времени
-        float elapsed_time;
-        cudaEventElapsedTime(&elapsed_time, start, stop);
-
-        std::cout << "Block size: " << block_size << " - Time: " << elapsed_time << " ms" << std::endl;
-
-        // Очистка ресурсов
-        cudaEventDestroy(start);
-        cudaEventDestroy(stop);
-    }
-
-    // Копирование результатов с устройства на хост
-    cudaMemcpy(h_C.data(), d_C, N * sizeof(float), cudaMemcpyDeviceToHost);
-    check_cuda_error("Memory copy from device to host");
-
-    // Проверка правильности результатов (необязательно, для тестирования)
-    for (int i = 0; i < N; ++i) {
-        if (fabs(h_A[i] + h_B[i] - h_C[i]) > 1e-6) {
-            std::cerr << "Error at index " << i << std::endl;
-            return EXIT_FAILURE;
-        }
-    }
-
-    // Освобождение памяти на устройстве
+    // Очистка памяти
     cudaFree(d_A);
     cudaFree(d_B);
     cudaFree(d_C);
+    delete[] h_A;
+    delete[] h_B;
+    delete[] h_C;
 
-    std::cout << "Success!" << std::endl;
+    return milliseconds;
+}
+
+int main() {
+    int threadConfigs[] = {1, 16, 32, 64, 128, 256, 512, 1024};
+
+    std::cout << "Threads per block | Time (ms)" << std::endl;
+    std::cout << "-----------------|----------" << std::endl;
+
+    for (int threadsPerBlock : threadConfigs) {
+        float time = measureKernelExecutionTime(threadsPerBlock);
+        std::cout << threadsPerBlock << "               | " << time << " ms" << std::endl;
+    }
+
     return 0;
 }
