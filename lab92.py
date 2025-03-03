@@ -1,9 +1,15 @@
+import pycuda.driver as drv
 import numpy as np
 import time
 from numba import cuda
-import pycuda.autoinit
-import pycuda.driver as drv
 from pycuda.compiler import SourceModule
+
+# Явная инициализация CUDA
+drv.init()
+
+# Получаем доступ к первому устройству (в твоём случае оно доступно как устройство 0)
+device = drv.Device(0)
+print(f"Using CUDA device: {device.name()}")
 
 # Функция для чтения матриц из файла
 def read_matrices(filename):
@@ -41,18 +47,14 @@ def multiply_with_numba(A, B, N):
     return d_C.copy_to_host()
 
 # PyCUDA
-mod = SourceModule("""
-__global__ void matmul(float *A, float *B, float *C, int N) {
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row < N && col < N) {
-        float sum = 0.0;
-        for (int k = 0; k < N; k++)
-            sum += A[row * N + k] * B[k * N + col];
-        C[row * N + col] = sum;
-    }
-}
-""")
+def load_kernel_code():
+    with open('cuda_kernel.cu', 'r') as f:
+        return f.read()
+
+cuda_kernel_code = load_kernel_code()
+
+mod = SourceModule(cuda_kernel_code)
+
 matmul_pycuda = mod.get_function("matmul")
 
 def multiply_with_pycuda(A, B, N):
